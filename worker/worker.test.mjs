@@ -104,3 +104,12 @@ test("微信接入：签名校验、主人锁定、回复 XML", async () => {
   r = await worker.fetch(msg("stranger", "删除提醒 1"), e);
   assert.match(await r.text(), /私人机器人/);
 });
+
+test("自检页", async () => {
+  const e = env();
+  const r = await worker.fetch(new Request("https://x/"), e);
+  const t = await r.text();
+  assert.match(t, /✅ 存储 FX/);
+  assert.match(t, /✅ WX_TOKEN/);
+  assert.match(t, /❌ WX_APPID/);
+});

@@ -442,15 +442,37 @@ export async function handleText(env, text, deps = {}) {
 
 // ------------------------------------------------------------------ 入口
 
+// 浏览器直接打开 Worker 网址时显示的自检页，只显示「有没有设置」，不显示具体值
+async function statusPage(env) {
+  const ok = (b) => (b ? "✅" : "❌");
+  let kv = false, owner = null;
+  try { owner = await env.FX.get("owner"); kv = true; } catch {}
+  const lines = [
+    "fxbot 自检",
+    `${ok(kv)} 存储 FX`,
+    `${ok(env.WX_TOKEN)} WX_TOKEN`,
+    `${ok(env.WX_APPID)} WX_APPID`,
+    `${ok(env.WX_SECRET)} WX_SECRET`,
+    `${ok(env.PUSHPLUS_TOKEN)} PUSHPLUS_TOKEN（可选）`,
+    `${ok(owner)} 已收到过你的微信消息`,
+  ];
+  return new Response(lines.join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const params = url.searchParams;
-    if (!params.get("signature")) return new Response("fxbot ok");
-    if (!(await wxSignatureOk(env, params))) return new Response("bad signature", { status: 403 });
+    if (!params.get("signature")) return statusPage(env);
+    console.log(`微信请求 ${request.method}`);
+    if (!(await wxSignatureOk(env, params))) {
+      console.log("签名不对：检查测试号页面的 Token 和 WX_TOKEN 是否完全一致");
+      return new Response("bad signature", { status: 403 });
+    }
     if (request.method === "GET") return new Response(params.get("echostr") || "");
 
     const xml = await request.text();
+    console.log(`收到消息：${xmlField(xml, "MsgType")} ${xmlField(xml, "Content") || xmlField(xml, "Event")}`);
     const from = xmlField(xml, "FromUserName"), to = xmlField(xml, "ToUserName");
     const type = xmlField(xml, "MsgType");
 
