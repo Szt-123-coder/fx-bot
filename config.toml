@@ -1,0 +1,23 @@
+# 汇率机器人配置。改完保存即可，下次运行自动生效。
+
+# 时区与每日总结推送时间（24 小时制，可增删）
+timezone = "Australia/Sydney"
+summary_times = ["08:00", "23:00"]
+
+# 关注的货币对，写法 "AUD/CNY" 表示 1 澳元 = ? 人民币
+pairs = ["USD/CNY", "AUD/CNY"]
+
+# 距离提醒线多近算"接近"（百分比）。0.5 表示相差 0.5% 以内就提醒
+approach_percent = 0.5
+
+# 提醒线：可写多条。
+# direction 可选 "up"（汇率涨到这个数提醒）或 "down"（跌到这个数提醒）；
+# 不写的话，机器人按第一次检查时的汇率自动判断方向。
+[[alerts]]
+pair = "AUD/CNY"
+target = 4.6
+
+# [[alerts]]
+# pair = "USD/CNY"
+# target = 7.0
+# direction = "down"

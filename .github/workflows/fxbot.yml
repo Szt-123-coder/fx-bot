@@ -1,0 +1,56 @@
+name: 汇率机器人
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 每 30 分钟检查一次提醒线；到了 config.toml 里的时间点会发每日总结
+  workflow_dispatch:          # 可在 GitHub 手机 App 里手动运行，用来随时查汇率
+    inputs:
+      base:
+        description: "要查的货币（如 AUD）。留空则只做常规检查"
+        required: false
+      quote:
+        description: "换成哪种货币（如 CNY）"
+        required: false
+        default: "CNY"
+      amount:
+        description: "金额（可选）"
+        required: false
+
+concurrency: fxbot
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 恢复状态（提醒是否已发过、价格历史）
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: fxbot-state-${{ github.run_id }}
+          restore-keys: fxbot-state-
+      - name: 查询汇率并推送
+        if: ${{ inputs.base != '' && inputs.base != null }}
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          BASE: ${{ inputs.base }}
+          QUOTE: ${{ inputs.quote }}
+          AMOUNT: ${{ inputs.amount }}
+        run: python fxbot.py rate "$BASE" "$QUOTE" $AMOUNT --push
+      - name: 检查提醒线 / 每日总结
+        if: ${{ inputs.base == '' || inputs.base == null }}
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python fxbot.py check
+      - name: 保存状态
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: fxbot-state-${{ github.run_id }}
