@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import worker, { parseAIJson, webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
+import worker, { parseBOC, parseAIJson, webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
 
 const kv = () => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); }, m }; };
 const env = () => ({ FX: kv(), WX_TOKEN: "tok" });
@@ -156,4 +156,36 @@ test("AI 对话：自然语言 → 指令 + 回答", async () => {
 test("AI 输出解析", () => {
   assert.deepEqual(parseAIJson('前缀 {"commands":["列表"],"reply":"好"} 后缀'), { commands: ["列表"], reply: "好" });
   assert.deepEqual(parseAIJson("纯文本回答"), { commands: [], reply: "纯文本回答" });
+});
+
+const BOC_HTML = `<table><tr><th>货币名称</th><th>现汇买入价</th></tr>
+<tr align="center">
+  <td>澳大利亚元</td>
+  <td>462.5</td>
+  <td>448.13</td>
+  <td>465.9</td>
+  <td>467.96</td>
+  <td>464.05</td>
+  <td class="pjrq">2026.10.04</td>
+  <td class="pjrq">13:30:00</td>
+</tr>
+<tr align="center"><td>美元</td><td>710.2</td><td>710.2</td><td>713.18</td><td>713.18</td><td>711.5</td><td>2026.10.04</td><td>13:30:00</td></tr>
+<tr align="center"><td>巴西里亚尔</td><td></td><td>120</td><td></td><td>140</td><td>130</td><td>2026.10.04</td><td>13:30:00</td></tr>
+</table>`;
+
+test("中国银行牌价：解析和指令", async () => {
+  const boc = parseBOC(BOC_HTML);
+  assert.deepEqual(boc.AUD, { buy_spot: 462.5, buy_cash: 448.13, sell_spot: 465.9, sell_cash: 467.96, mid: 464.05, time: "2026.10.04 13:30:00" });
+  assert.equal(boc.USD.sell_spot, 713.18);
+  assert.equal(Object.keys(boc).length, 2);
+  const e = env(), d = { fetchQuote: fakeQuote, fetchBOC: async () => boc };
+  const r = await handleText(e, "中行 澳元", d);
+  assert.match(r, /你用人民币买 AUD：现汇 4\.6590，现钞 4\.6796/);
+  assert.match(r, /卖给银行：现汇 4\.6250/);
+  assert.match(await handleText(e, "中行", d), /USD[\s\S]*AUD|AUD[\s\S]*USD/);
+  const q = await handleText(e, "1000 澳元", d);
+  assert.match(q, /中行现汇：你买 4\.6590/);
+  assert.match(q, /约需 4659\.00 CNY/);
+  const sum = buildSummary(CFG, { history: {} }, { "AUD/CNY": quoteOf("AUD/CNY", 4.52) }, NOW / 1000, boc);
+  assert.match(sum, /中行现汇：买 4\.6590/);
 });

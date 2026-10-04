@@ -100,6 +100,60 @@ export async function fetchQuote(pair, withHistory = true) {
   throw new Error(`${pair} 获取失败（${errors.join("；")}）`);
 }
 
+// ------------------------------------------------------------------ 中国银行外汇牌价（银行买入价 / 卖出价）
+
+const BOC_NAMES = {
+  澳大利亚元: "AUD", 美元: "USD", 欧元: "EUR", 英镑: "GBP", 日元: "JPY", 港币: "HKD", 新西兰元: "NZD",
+  加拿大元: "CAD", 新加坡元: "SGD", 瑞士法郎: "CHF", 韩国元: "KRW", 泰国铢: "THB", 新台币: "TWD",
+};
+
+export function parseBOC(html) {
+  const out = {};
+  const num = (x) => { const v = parseFloat(x); return Number.isFinite(v) ? v : null; };
+  for (const row of html.split(/<tr[\s>]/i).slice(1)) {
+    const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim());
+    const code = BOC_NAMES[cells[0]];
+    if (!code || cells.length < 6) continue;
+    out[code] = {
+      buy_spot: num(cells[1]), buy_cash: num(cells[2]), sell_spot: num(cells[3]), sell_cash: num(cells[4]),
+      mid: num(cells[5]), time: cells.slice(6).filter(Boolean).join(" "),
+    };
+  }
+  return out;
+}
+
+export async function fetchBOC(env) {
+  // 牌价大约每几分钟更新一次，缓存 10 分钟，避免频繁访问
+  try {
+    const cached = await loadJSON(env, "boc", null);
+    if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.data;
+  } catch {}
+  const r = await fetch("https://www.boc.cn/sourcedb/whpj/", {
+    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36" },
+  });
+  if (!r.ok) throw new Error(`中国银行牌价 HTTP ${r.status}`);
+  const data = parseBOC(await r.text());
+  if (!Object.keys(data).length) throw new Error("中国银行牌价页面格式变了，没解析到数据");
+  try { await saveJSON(env, "boc", { at: Date.now(), data }); } catch {}
+  return data;
+}
+
+async function fetchBOCSafe(env, deps = {}) {
+  try { return await (deps.fetchBOC || fetchBOC)(env); } catch (e) { console.log(e.message); return {}; }
+}
+
+export function bankLines(boc, code) {
+  const b = boc[code];
+  if (!b) return [];
+  const f = (x) => (x == null ? "—" : (x / 100).toFixed(4));
+  return [
+    `中国银行牌价（1 ${code} 换多少人民币）：`,
+    `· 你用人民币买 ${code}：现汇 ${f(b.sell_spot)}，现钞 ${f(b.sell_cash)}`,
+    `· 你把 ${code} 卖给银行：现汇 ${f(b.buy_spot)}，现钞 ${f(b.buy_cash)}`,
+    b.time ? `· 发布时间 ${b.time}` : "",
+  ].filter(Boolean);
+}
+
 // ------------------------------------------------------------------ 微信
 
 async function wxAccessToken(env) {
@@ -258,7 +312,7 @@ function advice(q, month, c24) {
   return s;
 }
 
-export function buildSummary(cfg, state, quotes, now) {
+export function buildSummary(cfg, state, quotes, now, boc = {}) {
   const lp = localParts(new Date(now * 1000), cfg.timezone);
   const lines = [`${lp.date} ${lp.hm}（${cfg.timezone}）`, ""];
   for (const q of Object.values(quotes)) {
@@ -278,6 +332,9 @@ export function buildSummary(cfg, state, quotes, now) {
     }
     for (const a of cfg.alerts.filter((a) => a.pair === q.pair)) {
       lines.push(`· 提醒线 ${a.target}：还差 ${sign(pct(q.price, a.target))}`);
+    }
+    if (quote === "CNY" && boc[base]?.sell_spot) {
+      lines.push(`· 中行现汇：买 ${(boc[base].sell_spot / 100).toFixed(4)} / 卖 ${(boc[base].buy_spot / 100).toFixed(4)}（你买 ${base} 按前一个价）`);
     }
     lines.push(month.length >= 3 ? `· 建议：${advice(q, month, c24)}` : "· 建议：历史数据还不够，运行几天后会给出");
     lines.push("");
@@ -324,7 +381,8 @@ export async function runCheck(env, nowDate = new Date(), fetcher = fetchAll, pu
   const slot = dueSummarySlot(cfg, state, nowDate);
   if (slot) {
     const summaryQuotes = Object.fromEntries(cfg.pairs.filter((p) => quotes[p]).map((p) => [p, quotes[p]]));
-    await pusher(env, "📊 每日汇率总结", buildSummary(cfg, state, summaryQuotes, now));
+    const boc = await fetchBOCSafe(env);
+    await pusher(env, "📊 每日汇率总结", buildSummary(cfg, state, summaryQuotes, now, boc));
     state.last_summary_slot = slot;
   }
   await saveJSON(env, "state", state);
@@ -341,6 +399,7 @@ const HELP = `可以直接用平常的话问我（比如「现在适合换澳元
 · 关注 欧元 / 取消关注 欧元：加入或移出每日总结
 · 时间 8:00 23:00：修改每日总结时间
 · 接近 0.3：距离提醒线多少 % 算接近
+· 中行 澳元：中国银行买入 / 卖出价
 · 列表：查看当前设置
 · 总结：马上发一份总结`;
 
@@ -363,9 +422,18 @@ export async function handleText(env, text, deps = {}) {
   if (/^(帮助|help|\?|？|菜单)$/i.test(t)) return HELP;
   if (/^(列表|设置|状态|list)$/i.test(t)) return listText(cfg);
 
+  if ((m = t.match(/^(?:中行|中国银行|银行价|银行|牌价|买入价|卖出价|买卖价)(?:牌价)? ?(.*)$/))) {
+    const boc = await (deps.fetchBOC || fetchBOC)(env).catch((e) => ({ _error: e.message }));
+    if (boc._error) return `暂时取不到中国银行牌价（${boc._error}）`;
+    const arg = normPair(m[1] || "");
+    const codes = arg ? [arg.split("/")[0]] : [...new Set(cfg.pairs.map((p) => p.split("/")[0]).filter((c) => c !== "CNY"))];
+    const parts = codes.map((c) => (boc[c] ? bankLines(boc, c).join("\n") : `中国银行没有 ${c} 的牌价`));
+    return `${parts.join("\n\n")}\n\n现汇＝账户里的外币，现钞＝现金。`;
+  }
+
   if (/^总结$/.test(t) && deps.inline) {
-    const quotes = await fetchAll({ ...cfg, alerts: [] }, quote);
-    return buildSummary(cfg, await loadState(env), quotes, Math.floor(Date.now() / 1000));
+    const [quotes, boc] = await Promise.all([fetchAll({ ...cfg, alerts: [] }, quote), fetchBOCSafe(env, deps)]);
+    return buildSummary(cfg, await loadState(env), quotes, Math.floor(Date.now() / 1000), boc);
   }
   if (/^总结$/.test(t)) {
     // 微信要求 5 秒内回复，总结要查多个货币对，所以先回一句，再主动推送
@@ -445,7 +513,15 @@ export async function handleText(env, text, deps = {}) {
       const [base, qq] = pair.split("/");
       let s = `1 ${base} = ${fmt(q.price)} ${qq}\n1 ${qq} = ${fmt(1 / q.price)} ${base}`;
       if (amt) s += `\n${Number(amt[0])} ${base} = ${(Number(amt[0]) * q.price).toFixed(2)} ${qq}`;
-      return `${s}\n（${q.source}）`;
+      s += `\n（市场中间价，${q.source}）`;
+      if (qq === "CNY") {
+        const boc = await fetchBOCSafe(env, deps);
+        if (boc[base]) {
+          s += `\n\n中行现汇：你买 ${(boc[base].sell_spot / 100).toFixed(4)}，你卖 ${(boc[base].buy_spot / 100).toFixed(4)}`;
+          if (amt) s += `\n按中行现汇买 ${Number(amt[0])} ${base} 约需 ${(Number(amt[0]) * boc[base].sell_spot / 100).toFixed(2)} CNY`;
+        }
+      }
+      return s;
     } catch (e) {
       return `查询失败：${e.message}`;
     }
@@ -472,10 +548,13 @@ export function parseAIJson(raw) {
 async function aiChat(env, text, cfg, deps) {
   const quote = deps.fetchQuote || fetchQuote;
   const now = Math.floor(Date.now() / 1000);
-  const quotes = await fetchAll({ ...cfg }, quote);
+  const [quotes, boc] = await Promise.all([fetchAll({ ...cfg }, quote), fetchBOCSafe(env, deps)]);
   const market = Object.keys(quotes).length
-    ? buildSummary(cfg, await loadState(env), quotes, now)
+    ? buildSummary(cfg, await loadState(env), quotes, now, boc)
     : "（暂时取不到汇率）";
+  const bank = Object.keys(boc).length
+    ? Object.keys(boc).map((c) => bankLines(boc, c).join("\n")).join("\n")
+    : "（暂时取不到中国银行牌价）";
   const history = await loadJSON(env, "chat_history", []);
 
   const system = `你是一个汇率助手，帮用户（持有人民币、住在澳洲）查汇率、判断换汇时机、管理提醒。
@@ -492,8 +571,11 @@ ${HELP.split("\n").slice(1).join("\n")}
 当前设置：
 ${listText(cfg)}
 
-最新行情：
-${market}`;
+最新行情（市场中间价）：
+${market}
+
+中国银行外汇牌价（用户用人民币买外币看「你用人民币买」那个价，把外币换回人民币看「卖给银行」那个价）：
+${bank}`;
 
   const messages = [{ role: "system", content: system }];
   for (const h of history.slice(-6)) messages.push(h);
@@ -617,7 +699,7 @@ async function send(text) {
 document.getElementById("f").addEventListener("submit", (e) => {
   e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ""; send(v);
 });
-for (const c of ["澳元", "美元", "列表", "总结", "帮助"]) {
+for (const c of ["澳元", "中行", "列表", "总结", "帮助"]) {
   const b = document.createElement("button"); b.type = "button"; b.textContent = c;
   b.onclick = () => send(c); document.getElementById("chips").appendChild(b);
 }
