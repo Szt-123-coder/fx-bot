@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import worker, { chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
+import worker, { webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
 
 const kv = () => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); }, m }; };
 const env = () => ({ FX: kv(), WX_TOKEN: "tok" });
@@ -107,9 +107,27 @@ test("微信接入：签名校验、主人锁定、回复 XML", async () => {
 
 test("自检页", async () => {
   const e = env();
-  const r = await worker.fetch(new Request("https://x/"), e);
+  const r = await worker.fetch(new Request("https://x/status"), e);
   const t = await r.text();
   assert.match(t, /✅ 存储 FX/);
   assert.match(t, /✅ WX_TOKEN/);
   assert.match(t, /❌ WX_APPID/);
+});
+
+test("网页聊天：页面、密码、指令", async () => {
+  const e = { ...env(), WEB_PASSWORD: "pw" };
+  let r = await worker.fetch(new Request("https://x/"), e);
+  assert.match(await r.text(), /汇率机器人/);
+  const call = (pw, text) => webChat(new Request("https://x/api/chat", { method: "POST",
+    headers: { Authorization: `Bearer ${pw}` }, body: JSON.stringify({ text }) }), e, { fetchQuote: fakeQuote });
+  r = await call("wrong", "帮助");
+  assert.equal(r.status, 401);
+  r = await call("pw", "1000 澳元");
+  assert.match((await r.json()).reply, /4520\.00 CNY/);
+  r = await call("pw", "提醒 澳元 4.7");
+  assert.match((await r.json()).reply, /AUD\/CNY 到 4\.7/);
+  r = await call("pw", "总结");
+  assert.match((await r.json()).reply, /【AUD\/CNY】/);
+  const noPw = await webChat(new Request("https://x/api/chat", { method: "POST", body: "{}" }), env());
+  assert.equal(noPw.status, 503);
 });

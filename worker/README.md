@@ -1,4 +1,16 @@
-# 聊天版汇率机器人（微信测试号 + Cloudflare Workers）
+# 聊天版汇率机器人（Cloudflare Workers）
+
+## 网页聊天（推荐）
+
+用手机浏览器打开 `https://fx-bot.<你的子域名>.workers.dev`，输入密码后就能像聊天一样发下面的指令。
+在浏览器菜单里选「添加到主屏幕」，用起来像一个 App。提醒和每日总结通过 PushPlus 发到微信。
+
+需要在 Worker → Settings → Variables and Secrets 里加一个 Secret：`WEB_PASSWORD`（网页登录密码，建议 12 位以上）。
+自检页：`https://fx-bot.<你的子域名>.workers.dev/status`
+
+> 微信测试号的聊天方式也保留在代码里，但微信转发消息的服务器连不上 `workers.dev`，需要自己的域名才能用。
+
+## 微信测试号（需要自己的域名）
 
 在微信里直接跟它说话：
 

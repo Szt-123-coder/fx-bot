@@ -361,6 +361,10 @@ export async function handleText(env, text, deps = {}) {
   if (/^(帮助|help|\?|？|菜单)$/i.test(t)) return HELP;
   if (/^(列表|设置|状态|list)$/i.test(t)) return listText(cfg);
 
+  if (/^总结$/.test(t) && deps.inline) {
+    const quotes = await fetchAll({ ...cfg, alerts: [] }, quote);
+    return buildSummary(cfg, await loadState(env), quotes, Math.floor(Date.now() / 1000));
+  }
   if (/^总结$/.test(t)) {
     // 微信要求 5 秒内回复，总结要查多个货币对，所以先回一句，再主动推送
     const job = (async () => {
@@ -445,7 +449,114 @@ export async function handleText(env, text, deps = {}) {
 
 // ------------------------------------------------------------------ 入口
 
-// 浏览器直接打开 Worker 网址时显示的自检页，只显示「有没有设置」，不显示具体值
+// ------------------------------------------------------------------ 网页聊天
+
+function sameText(a, b) {
+  // 逐字比较完所有字符，避免按耗时猜密码
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
+}
+
+export async function webChat(request, env, deps = {}) {
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json; charset=utf-8" } });
+  if (!env.WEB_PASSWORD) return json({ error: "还没有设置 WEB_PASSWORD，请先在 Cloudflare 里添加" }, 503);
+  const auth = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
+  if (!sameText(auth, env.WEB_PASSWORD)) {
+    await new Promise((r) => setTimeout(r, 1000));
+    return json({ error: "密码不对" }, 401);
+  }
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "请求格式不对" }, 400); }
+  const text = String(body.text || "").slice(0, 200);
+  if (!text.trim()) return json({ reply: HELP });
+  try {
+    return json({ reply: await handleText(env, text, { ...deps, inline: true }) });
+  } catch (e) {
+    return json({ reply: `出错了：${e.message}` });
+  }
+}
+
+const CHAT_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="汇率">
+<meta name="theme-color" content="#0f766e">
+<title>汇率机器人</title>
+<style>
+:root { --bg:#f3f4f6; --card:#fff; --text:#111827; --muted:#6b7280; --me:#0f766e; --me-text:#fff; --border:#e5e7eb; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0b0f14; --card:#18202a; --text:#e5e7eb; --muted:#9ca3af; --me:#14b8a6; --me-text:#042f2e; --border:#273241; } }
+* { box-sizing:border-box; }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+  font:16px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+body { display:flex; flex-direction:column; height:100dvh; }
+header { padding:12px 16px; padding-top:max(12px, env(safe-area-inset-top)); font-weight:600;
+  background:var(--card); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+header button { font-size:13px; color:var(--muted); background:none; border:0; padding:4px; }
+#log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+.msg { max-width:85%; padding:10px 12px; border-radius:14px; white-space:pre-wrap; word-break:break-word; }
+.bot { align-self:flex-start; background:var(--card); border:1px solid var(--border); border-bottom-left-radius:4px; }
+.me { align-self:flex-end; background:var(--me); color:var(--me-text); border-bottom-right-radius:4px; }
+.wait { color:var(--muted); }
+#chips { display:flex; gap:8px; overflow-x:auto; padding:8px 16px 0; }
+#chips button { flex:none; border:1px solid var(--border); background:var(--card); color:var(--text);
+  border-radius:999px; padding:6px 12px; font-size:14px; }
+form { display:flex; gap:8px; padding:8px 16px; padding-bottom:max(12px, env(safe-area-inset-bottom)); }
+input { flex:1; min-width:0; font-size:16px; padding:10px 12px; border-radius:12px; border:1px solid var(--border);
+  background:var(--card); color:var(--text); }
+form button { border:0; border-radius:12px; padding:0 16px; background:var(--me); color:var(--me-text); font-size:16px; }
+</style>
+</head>
+<body>
+<header><span>💱 汇率机器人</span><button id="logout" type="button">退出</button></header>
+<div id="log"></div>
+<div id="chips"></div>
+<form id="f"><input id="t" autocomplete="off" placeholder="例如：澳元、提醒 澳元 4.6"><button>发送</button></form>
+<script>
+const log = document.getElementById("log"), input = document.getElementById("t");
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} }, del(k) { try { localStorage.removeItem(k); } catch {} } };
+let pwd = store.get("fxbot_pwd");
+function mode() { input.type = pwd ? "text" : "password"; input.placeholder = pwd ? "例如：澳元、提醒 澳元 4.6" : "输入密码"; }
+function add(text, who) {
+  const d = document.createElement("div");
+  d.className = "msg " + who; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+}
+async function send(text) {
+  if (!pwd) { pwd = text; store.set("fxbot_pwd", pwd); mode(); add("••••••", "me"); return send("帮助"); }
+  if (text !== "帮助" || log.children.length > 1) add(text, "me");
+  const w = add("…", "bot wait");
+  try {
+    const r = await fetch("/api/chat", { method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + pwd },
+      body: JSON.stringify({ text }) });
+    const j = await r.json();
+    if (r.status === 401) { store.del("fxbot_pwd"); pwd = null; w.textContent = "密码不对，请重新输入密码："; mode(); }
+    else w.textContent = j.reply || j.error || "没有回复";
+  } catch (e) { w.textContent = "网络出错了，请重试"; }
+  w.classList.remove("wait"); log.scrollTop = log.scrollHeight;
+}
+document.getElementById("f").addEventListener("submit", (e) => {
+  e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ""; send(v);
+});
+for (const c of ["澳元", "美元", "列表", "总结", "帮助"]) {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = c;
+  b.onclick = () => send(c); document.getElementById("chips").appendChild(b);
+}
+document.getElementById("logout").onclick = () => { store.del("fxbot_pwd"); pwd = null; log.innerHTML = ""; mode(); add("请输入密码：", "bot"); };
+mode();
+if (pwd) send("帮助"); else add("请输入密码：", "bot");
+</script>
+</body>
+</html>`;
+
+// 浏览器打开 /status 时显示的自检页，只显示「有没有设置」，不显示具体值
 async function statusPage(env) {
   const ok = (b) => (b ? "✅" : "❌");
   let kv = false, owner = null;
@@ -457,7 +568,8 @@ async function statusPage(env) {
     `${ok(env.WX_APPID)} WX_APPID`,
     `${ok(env.WX_SECRET)} WX_SECRET`,
     `${ok(env.PUSHPLUS_TOKEN)} PUSHPLUS_TOKEN（可选）`,
-    `${ok(owner)} 已收到过你的微信消息`,
+    `${ok(env.WEB_PASSWORD)} WEB_PASSWORD（网页聊天密码）`,
+    `${ok(owner)} 已收到过微信测试号消息（只用网页聊天的话可以不管）`,
   ];
   try {
     const last = await env.FX.get("last_wx");
@@ -470,7 +582,11 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const params = url.searchParams;
-    if (!params.get("signature")) return statusPage(env);
+    if (url.pathname === "/status") return statusPage(env);
+    if (url.pathname === "/api/chat" && request.method === "POST") return webChat(request, env);
+    if (!params.get("signature")) {
+      return new Response(CHAT_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
     // 记录最近一次微信请求，显示在自检页上，方便排查
     const log = { at: new Date().toISOString(), method: request.method };
     const done = async (resp) => {
