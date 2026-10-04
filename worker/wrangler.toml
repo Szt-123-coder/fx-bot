@@ -4,6 +4,8 @@ main = "worker.js"
 compatibility_date = "2026-09-01"
 # 保留在控制台里填的变量（WX_TOKEN、WX_APPID 等），部署时不覆盖
 keep_vars = true
+# 开启 fx-bot.<子域名>.workers.dev 网址，微信要通过它找到机器人
+workers_dev = true
 
 [triggers]
 crons = ["*/15 * * * *"]
