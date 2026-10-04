@@ -1,0 +1,13 @@
+# Cloudflare 从 GitHub 自动部署用。部署命令：cd worker && npx wrangler deploy
+name = "fx-bot"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+# 保留在控制台里填的变量（WX_TOKEN、WX_APPID 等），部署时不覆盖
+keep_vars = true
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+# 存设置和状态。不写 id 时，首次部署会自动创建
+[[kv_namespaces]]
+binding = "FX"
