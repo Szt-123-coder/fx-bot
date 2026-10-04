@@ -332,7 +332,7 @@ export async function runCheck(env, nowDate = new Date(), fetcher = fetchAll, pu
 
 // ------------------------------------------------------------------ 聊天指令
 
-const HELP = `可以这样跟我说：
+const HELP = `可以直接用平常的话问我（比如「现在适合换澳元吗」「澳元到 4.6 提醒我」），也可以用这些简短指令：
 · 澳元 / 美元 / AUD / EUR USD：查汇率（默认换成人民币）
 · 1000 澳元：换算金额
 · 提醒 澳元 4.6：AUD/CNY 到 4.6 附近和到达时提醒
@@ -356,6 +356,8 @@ export async function handleText(env, text, deps = {}) {
   const t = text.trim().replace(/\s+/g, " ");
   const cfg = await loadConfig(env);
   const save = () => saveJSON(env, "config", cfg);
+  // 指令格式不对时，有 AI 就交给 AI 理解，没有就提示格式
+  const fail = (msg) => (env.AI && !deps.noAI ? aiChat(env, t, cfg, deps) : msg);
   let m;
 
   if (/^(帮助|help|\?|？|菜单)$/i.test(t)) return HELP;
@@ -384,7 +386,7 @@ export async function handleText(env, text, deps = {}) {
       const pair = normPair(arg.replace(/\d+(\.\d+)?/, ""));
       idx = cfg.alerts.findIndex((a) => a.pair === pair && (!num || a.target === Number(num[0])));
     }
-    if (idx < 0 || idx >= cfg.alerts.length) return `没找到这条提醒。\n\n${listText(cfg)}`;
+    if (idx < 0 || idx >= cfg.alerts.length) return fail(`没找到这条提醒。\n\n${listText(cfg)}`);
     const [removed] = cfg.alerts.splice(idx, 1);
     await save();
     return `已删除提醒：${removed.pair} ${removed.target}`;
@@ -393,7 +395,7 @@ export async function handleText(env, text, deps = {}) {
   if ((m = t.match(/^(?:提醒|设置提醒|提醒线) ?(.+)$/))) {
     const num = m[1].match(/\d+(\.\d+)?/);
     const pair = normPair(m[1].replace(/\d+(\.\d+)?/, "").replace(/[涨跌]/g, ""));
-    if (!num || !pair) return "格式：提醒 澳元 4.6（可在末尾加 涨 / 跌）";
+    if (!num || !pair) return fail("格式：提醒 澳元 4.6（可在末尾加 涨 / 跌）");
     const target = Number(num[0]);
     const alert = { pair, target };
     if (/涨/.test(m[1])) alert.direction = "up";
@@ -408,7 +410,7 @@ export async function handleText(env, text, deps = {}) {
 
   if ((m = t.match(/^(取消关注|关注) ?(.+)$/))) {
     const pair = normPair(m[2]);
-    if (!pair) return "格式：关注 欧元，或 关注 EUR/CNY";
+    if (!pair) return fail("格式：关注 欧元，或 关注 EUR/CNY");
     if (m[1] === "关注") {
       if (!cfg.pairs.includes(pair)) cfg.pairs.push(pair);
     } else cfg.pairs = cfg.pairs.filter((p) => p !== pair);
@@ -420,7 +422,7 @@ export async function handleText(env, text, deps = {}) {
     const times = [...m[1].matchAll(/(\d{1,2})[:：点](\d{2})?/g)]
       .map((x) => `${x[1].padStart(2, "0")}:${x[2] || "00"}`)
       .filter((x) => Number(x.slice(0, 2)) < 24);
-    if (!times.length) return "格式：时间 8:00 23:00";
+    if (!times.length) return fail("格式：时间 8:00 23:00");
     cfg.summary_times = times;
     await save();
     return `好的，每天 ${times.join("、")}（${cfg.timezone}）发总结。`;
@@ -432,19 +434,89 @@ export async function handleText(env, text, deps = {}) {
     return `好的，距离提醒线 ${cfg.approach_percent}% 以内算「接近」。`;
   }
 
-  // 其余当作查汇率：「澳元」「AUD」「1000 澳元」「EUR USD」
+  // 只有货币名 / 代码 / 金额的短句，直接查汇率：「澳元」「AUD」「1000 澳元」「EUR USD」
   const amt = t.match(/\d+(\.\d+)?/);
   const pair = normPair(t.replace(/\d+(\.\d+)?/, ""));
-  if (!pair) return `没看懂这句话。\n\n${HELP}`;
-  try {
-    const q = await quote(pair, false);
-    const [base, qq] = pair.split("/");
-    let s = `1 ${base} = ${fmt(q.price)} ${qq}\n1 ${qq} = ${fmt(1 / q.price)} ${base}`;
-    if (amt) s += `\n${Number(amt[0])} ${base} = ${(Number(amt[0]) * q.price).toFixed(2)} ${qq}`;
-    return `${s}\n（${q.source}）`;
-  } catch (e) {
-    return `查询失败：${e.message}`;
+  const leftover = Object.keys(NAMES).reduce((x, k) => x.replaceAll(k, ""), t)
+    .replace(/[A-Za-z]{3}|\d+(\.\d+)?|汇率|多少|现在|兑|换|成|是|的|[\s/?？]/g, "");
+  if (pair && (!leftover || !env.AI || deps.noAI)) {
+    try {
+      const q = await quote(pair, false);
+      const [base, qq] = pair.split("/");
+      let s = `1 ${base} = ${fmt(q.price)} ${qq}\n1 ${qq} = ${fmt(1 / q.price)} ${base}`;
+      if (amt) s += `\n${Number(amt[0])} ${base} = ${(Number(amt[0]) * q.price).toFixed(2)} ${qq}`;
+      return `${s}\n（${q.source}）`;
+    } catch (e) {
+      return `查询失败：${e.message}`;
+    }
   }
+  // 其他自然语言交给 AI 理解
+  if (env.AI && !deps.noAI) return aiChat(env, t, cfg, deps);
+  return `没看懂这句话。\n\n${HELP}`;
+}
+
+// ------------------------------------------------------------------ AI 对话（Cloudflare Workers AI，免费额度）
+
+const AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+export function parseAIJson(raw) {
+  if (raw && typeof raw === "object") return raw;
+  const s = String(raw || "");
+  const i = s.indexOf("{"), j = s.lastIndexOf("}");
+  if (i >= 0 && j > i) {
+    try { return JSON.parse(s.slice(i, j + 1)); } catch {}
+  }
+  return { commands: [], reply: s.trim() };
+}
+
+async function aiChat(env, text, cfg, deps) {
+  const quote = deps.fetchQuote || fetchQuote;
+  const now = Math.floor(Date.now() / 1000);
+  const quotes = await fetchAll({ ...cfg }, quote);
+  const market = Object.keys(quotes).length
+    ? buildSummary(cfg, await loadState(env), quotes, now)
+    : "（暂时取不到汇率）";
+  const history = await loadJSON(env, "chat_history", []);
+
+  const system = `你是一个汇率助手，帮用户（持有人民币、住在澳洲）查汇率、判断换汇时机、管理提醒。
+永远用简体中文、口语化、简短地回答（一般不超过 5 行）。不要编造数字，只用下面给出的行情数据。涉及买卖时提醒「仅供参考」。
+
+你可以让系统执行这些指令（每条一行，原样写）：
+${HELP.split("\n").slice(1).join("\n")}
+
+规则：
+- 用户想设置、删除提醒，关注或取消关注货币，改总结时间，改接近幅度，或者要看某个不在行情数据里的汇率时，才输出对应指令。
+- 只是问问题（比如「现在适合换吗」「最近涨了吗」），就直接根据行情数据回答，不要输出指令。
+- 只输出一个 JSON 对象，不要输出其他文字：{"commands": ["指令1"], "reply": "给用户的话"}
+
+当前设置：
+${listText(cfg)}
+
+最新行情：
+${market}`;
+
+  const messages = [{ role: "system", content: system }];
+  for (const h of history.slice(-6)) messages.push(h);
+  messages.push({ role: "user", content: text });
+
+  let out;
+  try {
+    const res = await env.AI.run(env.AI_MODEL || AI_MODEL, { messages, max_tokens: 700, temperature: 0.3 });
+    out = parseAIJson(res.response ?? res);
+  } catch (e) {
+    return `AI 暂时用不了（${e.message}）。可以先用指令：\n\n${HELP}`;
+  }
+
+  const results = [];
+  for (const c of (Array.isArray(out.commands) ? out.commands : []).slice(0, 5)) {
+    if (typeof c !== "string" || !c.trim()) continue;
+    results.push(await handleText(env, c, { ...deps, noAI: true, inline: true }));
+  }
+  const reply = [String(out.reply || "").trim(), ...results].filter(Boolean).join("\n\n") || "嗯，我没太明白，可以换个说法吗？";
+
+  history.push({ role: "user", content: text }, { role: "assistant", content: reply.slice(0, 400) });
+  await saveJSON(env, "chat_history", history.slice(-12));
+  return reply;
 }
 
 // ------------------------------------------------------------------ 入口
@@ -516,13 +588,13 @@ form button { border:0; border-radius:12px; padding:0 16px; background:var(--me)
 <header><span>💱 汇率机器人</span><button id="logout" type="button">退出</button></header>
 <div id="log"></div>
 <div id="chips"></div>
-<form id="f"><input id="t" autocomplete="off" placeholder="例如：澳元、提醒 澳元 4.6"><button>发送</button></form>
+<form id="f"><input id="t" autocomplete="off" placeholder="随便问，比如：现在适合换澳元吗？"><button>发送</button></form>
 <script>
 const log = document.getElementById("log"), input = document.getElementById("t");
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} }, del(k) { try { localStorage.removeItem(k); } catch {} } };
 let pwd = store.get("fxbot_pwd");
-function mode() { input.type = pwd ? "text" : "password"; input.placeholder = pwd ? "例如：澳元、提醒 澳元 4.6" : "输入密码"; }
+function mode() { input.type = pwd ? "text" : "password"; input.placeholder = pwd ? "随便问，比如：现在适合换澳元吗？" : "输入密码"; }
 function add(text, who) {
   const d = document.createElement("div");
   d.className = "msg " + who; d.textContent = text;
@@ -569,6 +641,7 @@ async function statusPage(env) {
     `${ok(env.WX_SECRET)} WX_SECRET`,
     `${ok(env.PUSHPLUS_TOKEN)} PUSHPLUS_TOKEN（可选）`,
     `${ok(env.WEB_PASSWORD)} WEB_PASSWORD（网页聊天密码）`,
+    `${ok(env.AI)} AI（自由对话）`,
     `${ok(owner)} 已收到过微信测试号消息（只用网页聊天的话可以不管）`,
   ];
   try {

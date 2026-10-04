@@ -17,3 +17,7 @@ binding = "FX"
 # 在 Cloudflare 控制台 Worker → Observability 里能看到日志
 [observability]
 enabled = true
+
+# Cloudflare Workers AI（免费额度），用来理解自然语言
+[ai]
+binding = "AI"

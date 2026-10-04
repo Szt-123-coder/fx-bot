@@ -2,7 +2,8 @@
 
 ## 网页聊天（推荐）
 
-用手机浏览器打开 `https://fx-bot.<你的子域名>.workers.dev`，输入密码后就能像聊天一样发下面的指令。
+用手机浏览器打开 `https://fx-bot.<你的子域名>.workers.dev`，输入密码后就能用平常的话聊天，比如「现在适合换澳元吗」「澳元到 4.6 提醒我」「把欧元也加进每日总结」。
+理解自然语言用的是 Cloudflare 自带的免费 AI（Workers AI，每天有免费额度，个人使用足够），不需要额外申请。下面的简短指令也一直能用。
 在浏览器菜单里选「添加到主屏幕」，用起来像一个 App。提醒和每日总结通过 PushPlus 发到微信。
 
 需要在 Worker → Settings → Variables and Secrets 里加一个 Secret：`WEB_PASSWORD`（网页登录密码，建议 12 位以上）。

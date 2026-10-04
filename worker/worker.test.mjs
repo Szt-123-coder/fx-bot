@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import worker, { webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
+import worker, { parseAIJson, webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
 
 const kv = () => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); }, m }; };
 const env = () => ({ FX: kv(), WX_TOKEN: "tok" });
@@ -99,7 +99,7 @@ test("微信接入：签名校验、主人锁定、回复 XML", async () => {
   const msg = (from, text) => new Request(`https://x${q}`, { method: "POST", body:
     `<xml><ToUserName><![CDATA[bot]]></ToUserName><FromUserName><![CDATA[${from}]]></FromUserName><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[${text}]]></Content></xml>` });
   r = await worker.fetch(msg("me", "帮助"), e);
-  assert.match(await r.text(), /<ToUserName><!\[CDATA\[me\]\]>.*可以这样跟我说/s);
+  assert.match(await r.text(), /<ToUserName><!\[CDATA\[me\]\]>.*简短指令/s);
   assert.equal(await e.FX.get("owner"), "me");
   r = await worker.fetch(msg("stranger", "删除提醒 1"), e);
   assert.match(await r.text(), /私人机器人/);
@@ -130,4 +130,30 @@ test("网页聊天：页面、密码、指令", async () => {
   assert.match((await r.json()).reply, /【AUD\/CNY】/);
   const noPw = await webChat(new Request("https://x/api/chat", { method: "POST", body: "{}" }), env());
   assert.equal(noPw.status, 503);
+});
+
+test("AI 对话：自然语言 → 指令 + 回答", async () => {
+  const calls = [];
+  const e = { ...env(), AI: { run: async (model, input) => {
+    calls.push(input.messages);
+    const q = input.messages.at(-1).content;
+    if (q.includes("提醒我")) return { response: '好的 {"commands": ["提醒 澳元 4.65"], "reply": "帮你设好了"}' };
+    return { response: '{"commands": [], "reply": "现在处于近 30 天低位，可以分批换。仅供参考。"}' };
+  } } };
+  const d = { fetchQuote: fakeQuote };
+  assert.match(await handleText(e, "澳元", d), /1 AUD = 4\.5200/);          // 纯货币名不走 AI
+  assert.equal(calls.length, 0);
+  assert.match(await handleText(e, "现在适合换澳元吗", d), /低位/);
+  assert.match(calls[0][0].content, /最新行情/);
+  const r = await handleText(e, "澳元涨到4.65的时候提醒我", d);
+  assert.match(r, /帮你设好了/);
+  assert.match(r, /AUD\/CNY 到 4\.65/);
+  assert.ok(JSON.parse(await e.FX.get("config")).alerts.some((a) => a.target === 4.65));
+  assert.equal(JSON.parse(await e.FX.get("chat_history")).length, 4);
+  assert.match(await handleText(env(), "随便聊聊", d), /没看懂/);              // 没有 AI 时退回指令模式
+});
+
+test("AI 输出解析", () => {
+  assert.deepEqual(parseAIJson('前缀 {"commands":["列表"],"reply":"好"} 后缀'), { commands: ["列表"], reply: "好" });
+  assert.deepEqual(parseAIJson("纯文本回答"), { commands: [], reply: "纯文本回答" });
 });
