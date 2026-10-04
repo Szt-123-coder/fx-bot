@@ -45,3 +45,7 @@ python -m unittest test_fxbot  # 离线测试
 ```
 
 买入建议依据：当前价在近 30 天区间的位置、和 30 天均值比较、24 小时涨跌。仅供参考，不构成投资建议。
+
+---
+
+**聊天版**：想在微信里直接查汇率、改提醒线，见 [worker/README.md](worker/README.md)（微信测试号 + Cloudflare Workers，免费）。
