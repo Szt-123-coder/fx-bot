@@ -48,6 +48,9 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python fxbot.py check
+      - name: 准备状态目录
+        if: always()
+        run: mkdir -p state && touch state/.keep
       - name: 保存状态
         if: always()
         uses: actions/cache/save@v4
