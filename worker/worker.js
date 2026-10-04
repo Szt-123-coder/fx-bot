@@ -293,6 +293,33 @@ export function checkAlerts(cfg, state, quotes) {
   return msgs;
 }
 
+// 波动提醒：从最近的高点（跌提醒）或低点（涨提醒）变动超过 step% 就提醒一次，然后以新价格为起点继续盯
+export function checkMoves(cfg, state, quotes) {
+  const msgs = [];
+  state.moves ||= {};
+  for (const mv of cfg.moves || []) {
+    const q = quotes[mv.pair];
+    if (!q) continue;
+    const key = `${mv.pair}@${mv.direction}`;
+    const st = (state.moves[key] ||= {});
+    const p = q.price;
+    if (st.high == null) { st.high = st.low = p; continue; }
+    st.high = Math.max(st.high, p);
+    st.low = Math.min(st.low, p);
+    const [base, quote] = mv.pair.split("/");
+    if (mv.direction !== "up" && pct(st.high, p) <= -mv.step) {
+      msgs.push([`📉 ${base} 跌了 ${Math.abs(pct(st.high, p)).toFixed(2)}%`,
+        `${mv.pair} 从 ${fmt(st.high)} 跌到 ${fmt(p)}（1 ${base} = ${fmt(p)} ${quote}）。`]);
+      st.high = st.low = p;
+    } else if (mv.direction !== "down" && pct(st.low, p) >= mv.step) {
+      msgs.push([`📈 ${base} 涨了 ${pct(st.low, p).toFixed(2)}%`,
+        `${mv.pair} 从 ${fmt(st.low)} 涨到 ${fmt(p)}（1 ${base} = ${fmt(p)} ${quote}）。`]);
+      st.high = st.low = p;
+    }
+  }
+  return msgs;
+}
+
 // ------------------------------------------------------------------ 总结与建议
 
 function advice(q, month, c24) {
@@ -364,7 +391,7 @@ export function dueSummarySlot(cfg, state, nowDate) {
 // ------------------------------------------------------------------ 定时任务
 
 async function fetchAll(cfg, fq = fetchQuote) {
-  const pairs = [...new Set([...cfg.pairs, ...cfg.alerts.map((a) => a.pair)])];
+  const pairs = [...new Set([...cfg.pairs, ...cfg.alerts.map((a) => a.pair), ...(cfg.moves || []).map((m) => m.pair)])];
   const results = await Promise.allSettled(pairs.map((p) => fq(p)));
   const quotes = {};
   results.forEach((r, i) => { if (r.status === "fulfilled") quotes[pairs[i]] = r.value; else console.log(r.reason.message); });
@@ -377,7 +404,7 @@ export async function runCheck(env, nowDate = new Date(), fetcher = fetchAll, pu
   const quotes = await fetcher(cfg);
   if (!Object.keys(quotes).length) throw new Error("所有汇率都获取失败");
   for (const q of Object.values(quotes)) record(state, q, now);
-  for (const [t, b] of checkAlerts(cfg, state, quotes)) await pusher(env, t, b);
+  for (const [t, b] of [...checkAlerts(cfg, state, quotes), ...checkMoves(cfg, state, quotes)]) await pusher(env, t, b);
   const slot = dueSummarySlot(cfg, state, nowDate);
   if (slot) {
     const summaryQuotes = Object.fromEntries(cfg.pairs.filter((p) => quotes[p]).map((p) => [p, quotes[p]]));
@@ -396,6 +423,8 @@ const HELP = `可以直接用平常的话问我（比如「现在适合换澳元
 · 提醒 澳元 4.6：AUD/CNY 到 4.6 附近和到达时提醒
 · 提醒 美元 7.0 跌：只在跌到 7.0 时提醒（涨 / 跌可省略）
 · 删除提醒 澳元 4.6，或 删除提醒 1（按列表序号）
+· 波动 澳元 跌 0.2：澳元每跌 0.2% 提醒一次（涨 / 跌都不写表示两个方向）
+· 取消波动 澳元
 · 关注 欧元 / 取消关注 欧元：加入或移出每日总结
 · 时间 8:00 23:00：修改每日总结时间
 · 接近 0.3：距离提醒线多少 % 算接近
@@ -407,7 +436,11 @@ function listText(cfg) {
   const alerts = cfg.alerts.length
     ? cfg.alerts.map((a, i) => `  ${i + 1}. ${a.pair} ${a.target}${a.direction ? (a.direction === "up" ? "（涨到）" : "（跌到）") : ""}`).join("\n")
     : "  （无）";
-  return `关注：${cfg.pairs.join("、") || "（无）"}\n提醒线：\n${alerts}\n总结时间：${cfg.summary_times.join("、")}（${cfg.timezone}）\n接近幅度：${cfg.approach_percent}%`;
+  const moveName = { up: "每涨", down: "每跌", both: "每涨或跌" };
+  const moves = (cfg.moves || []).length
+    ? cfg.moves.map((m, i) => `  ${i + 1}. ${m.pair} ${moveName[m.direction]} ${m.step}% 提醒`).join("\n")
+    : "  （无）";
+  return `关注：${cfg.pairs.join("、") || "（无）"}\n提醒线：\n${alerts}\n波动提醒：\n${moves}\n总结时间：${cfg.summary_times.join("、")}（${cfg.timezone}）\n接近幅度：${cfg.approach_percent}%`;
 }
 
 export async function handleText(env, text, deps = {}) {
@@ -416,7 +449,8 @@ export async function handleText(env, text, deps = {}) {
   const cfg = await loadConfig(env);
   const save = () => saveJSON(env, "config", cfg);
   // 指令格式不对时，有 AI 就交给 AI 理解，没有就提示格式
-  const fail = (msg) => (env.AI && !deps.noAI ? aiChat(env, t, cfg, deps) : msg);
+  const fail = (msg) => (env.AI && !deps.noAI ? aiChat(env, t, cfg, deps) : deps.noAI ? `❗${msg}` : msg);
+  cfg.moves ||= [];
   let m;
 
   if (/^(帮助|help|\?|？|菜单)$/i.test(t)) return HELP;
@@ -443,6 +477,30 @@ export async function handleText(env, text, deps = {}) {
     })().catch((e) => console.log(e.message));
     if (deps.waitUntil) deps.waitUntil(job); else await job;
     return "正在生成总结，马上发给你。";
+  }
+
+  if ((m = t.match(/^(?:取消波动|删除波动|取消波动提醒|删除波动提醒) ?(.*)$/))) {
+    const arg = m[1].trim();
+    let idx = /^\d+$/.test(arg) ? Number(arg) - 1 : cfg.moves.findIndex((x) => x.pair === normPair(arg));
+    if (idx < 0 || idx >= cfg.moves.length) return fail(`没找到这条波动提醒。\n\n${listText(cfg)}`);
+    const [removed] = cfg.moves.splice(idx, 1);
+    await save();
+    return `已取消波动提醒：${removed.pair}`;
+  }
+
+  if ((m = t.match(/^(?:波动提醒|波动) ?(.+)$/)) || ((m = t.match(/^(?:提醒|设置提醒) ?(.+)$/)) && /[涨跌降升]/.test(m[1]) && !/\d/.test(m[1]))) {
+    const arg = m[1];
+    const pair = normPair(arg.replace(/\d+(\.\d+)?%?/, "").replace(/[涨跌降升了就时候提醒我]/g, ""));
+    if (!pair) return fail("格式：波动 澳元 跌 0.2（每跌 0.2% 提醒一次；涨 / 跌都写或都不写表示两个方向）");
+    const up = /[涨升]/.test(arg), down = /[跌降]/.test(arg);
+    const direction = up && !down ? "up" : down && !up ? "down" : "both";
+    const num = arg.match(/\d+(\.\d+)?/);
+    const step = num ? Number(num[0]) : 0.2;
+    cfg.moves = cfg.moves.filter((x) => !(x.pair === pair && x.direction === direction));
+    cfg.moves.push({ pair, direction, step });
+    await save();
+    const word = { up: "每涨", down: "每跌", both: "每涨或跌" }[direction];
+    return `好的，${pair} 从现在起${word} ${step}% 就提醒你一次（下一次检查开始计算，最多 15 分钟）。`;
   }
 
   if ((m = t.match(/^(?:删除提醒|删提醒|取消提醒) ?(.*)$/))) {
@@ -564,6 +622,8 @@ async function aiChat(env, text, cfg, deps) {
 ${HELP.split("\n").slice(1).join("\n")}
 
 规则：
+- 「涨了 / 跌了就提醒」「每跌多少提醒」这类没有具体价位的要求，用「波动」指令，比如：波动 澳元 跌 0.2。有具体价位才用「提醒」指令。
+- 不要在 reply 里说「已设置」，系统会把指令执行结果附在后面。
 - 用户想设置、删除提醒，关注或取消关注货币，改总结时间，改接近幅度，或者要看某个不在行情数据里的汇率时，才输出对应指令。
 - 只是问问题（比如「现在适合换吗」「最近涨了吗」），就直接根据行情数据回答，不要输出指令。
 - 只输出一个 JSON 对象，不要输出其他文字：{"commands": ["指令1"], "reply": "给用户的话"}
@@ -594,7 +654,10 @@ ${bank}`;
     if (typeof c !== "string" || !c.trim()) continue;
     results.push(await handleText(env, c, { ...deps, noAI: true, inline: true }));
   }
-  const reply = [String(out.reply || "").trim(), ...results].filter(Boolean).join("\n\n") || "嗯，我没太明白，可以换个说法吗？";
+  const failed = results.filter((r) => r.startsWith("❗"));
+  const reply = failed.length
+    ? `这个没设置成功：\n${failed.map((r) => r.slice(1)).join("\n")}`
+    : [String(out.reply || "").trim(), ...results].filter(Boolean).join("\n\n") || "嗯，我没太明白，可以换个说法吗？";
 
   history.push({ role: "user", content: text }, { role: "assistant", content: reply.slice(0, 400) });
   await saveJSON(env, "chat_history", history.slice(-12));

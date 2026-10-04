@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import worker, { parseBOC, parseAIJson, webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
+import worker, { checkMoves, parseBOC, parseAIJson, webChat, chunks, normPair, checkAlerts, dueSummarySlot, handleText, buildSummary, runCheck } from "./worker.js";
 
 const kv = () => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, put: async (k, v) => { m.set(k, v); }, m }; };
 const env = () => ({ FX: kv(), WX_TOKEN: "tok" });
@@ -188,4 +188,28 @@ test("中国银行牌价：解析和指令", async () => {
   assert.match(q, /约需 4659\.00 CNY/);
   const sum = buildSummary(CFG, { history: {} }, { "AUD/CNY": quoteOf("AUD/CNY", 4.52) }, NOW / 1000, boc);
   assert.match(sum, /中行现汇：买 4\.6590/);
+});
+
+test("波动提醒：从高点跌 0.2% 提醒，之后从新价位重新算", () => {
+  const cfg = { moves: [{ pair: "AUD/CNY", direction: "down", step: 0.2 }] };
+  const st = {};
+  const run = (p) => checkMoves(cfg, st, { "AUD/CNY": quoteOf("AUD/CNY", p) });
+  assert.deepEqual(run(4.65), []);        // 第一次只记录起点
+  assert.deepEqual(run(4.66), []);        // 涨了：高点变成 4.66
+  assert.deepEqual(run(4.655), []);       // 跌 0.11%，不够
+  assert.match(run(4.65)[0][0], /AUD 跌了 0\.21%/);
+  assert.deepEqual(run(4.648), []);       // 从 4.65 重新算
+  assert.match(run(4.64)[0][0], /跌了/);
+});
+
+test("波动提醒指令和 AI 失败时如实告知", async () => {
+  const e = env(), d = { fetchQuote: fakeQuote };
+  assert.match(await handleText(e, "提醒 澳元 跌", d), /AUD\/CNY 从现在起每跌 0\.2%/);
+  assert.match(await handleText(e, "波动 美元 0.5", d), /USD\/CNY 从现在起每涨或跌 0\.5%/);
+  assert.match(await handleText(e, "列表", d), /波动提醒：\n  1\. AUD\/CNY 每跌 0\.2% 提醒\n  2\. USD\/CNY 每涨或跌 0\.5% 提醒/);
+  assert.match(await handleText(e, "取消波动 1", d), /已取消波动提醒：AUD\/CNY/);
+  const ai = { ...env(), AI: { run: async () => ({ response: '{"commands":["关注 火星币"],"reply":"已设置好了"}' }) } };
+  const r = await handleText(ai, "帮我关注一下火星币", d);
+  assert.match(r, /没设置成功/);
+  assert.doesNotMatch(r, /已设置好了/);
 });
