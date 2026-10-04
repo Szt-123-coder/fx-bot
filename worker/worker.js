@@ -170,6 +170,9 @@ const xmlField = (xml, tag) => {
   return m ? (m[1] ?? m[2]) : "";
 };
 
+const xmlResponse = (to, from, text) =>
+  new Response(wxReply(to, from, text), { headers: { "Content-Type": "application/xml; charset=utf-8" } });
+
 const wxReply = (to, from, text) =>
   `<xml><ToUserName><![CDATA[${to}]]></ToUserName><FromUserName><![CDATA[${from}]]></FromUserName>` +
   `<CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime><MsgType><![CDATA[text]]></MsgType>` +
@@ -456,6 +459,10 @@ async function statusPage(env) {
     `${ok(env.PUSHPLUS_TOKEN)} PUSHPLUS_TOKEN（可选）`,
     `${ok(owner)} 已收到过你的微信消息`,
   ];
+  try {
+    const last = await env.FX.get("last_wx");
+    lines.push("", `最近一次微信请求：${last || "（还没有）"}`);
+  } catch {}
   return new Response(lines.join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
@@ -464,31 +471,44 @@ export default {
     const url = new URL(request.url);
     const params = url.searchParams;
     if (!params.get("signature")) return statusPage(env);
-    console.log(`微信请求 ${request.method}`);
-    if (!(await wxSignatureOk(env, params))) {
-      console.log("签名不对：检查测试号页面的 Token 和 WX_TOKEN 是否完全一致");
-      return new Response("bad signature", { status: 403 });
+    // 记录最近一次微信请求，显示在自检页上，方便排查
+    const log = { at: new Date().toISOString(), method: request.method };
+    const done = async (resp) => {
+      log.status = resp.status;
+      try { await env.FX.put("last_wx", JSON.stringify(log)); } catch {}
+      console.log(JSON.stringify(log));
+      return resp;
+    };
+    try {
+      log.sig = await wxSignatureOk(env, params);
+      if (!log.sig) return done(new Response("bad signature", { status: 403 }));
+      if (request.method === "GET") return done(new Response(params.get("echostr") || ""));
+
+      const xml = await request.text();
+      const from = xmlField(xml, "FromUserName"), to = xmlField(xml, "ToUserName");
+      const type = xmlField(xml, "MsgType");
+      log.type = type;
+      log.content = (xmlField(xml, "Content") || xmlField(xml, "Event")).slice(0, 30);
+      if (!from) log.raw = xml.slice(0, 120);
+
+      // 第一个发消息的人成为主人；其他人一律不理，避免被别人改设置
+      let owner = await env.FX.get("owner");
+      if (!owner) { owner = from; await env.FX.put("owner", from); }
+      if (from !== owner) { log.note = "不是主人"; return done(xmlResponse(from, to, "这是私人机器人。")); }
+
+      let text;
+      if (type === "event") text = xmlField(xml, "Event") === "subscribe" ? `欢迎！\n\n${HELP}` : "";
+      else if (type === "text") {
+        try { text = await handleText(env, xmlField(xml, "Content"), { waitUntil: (p) => ctx.waitUntil(p) }); }
+        catch (e) { text = `出错了：${e.message}`; log.error = e.message; }
+      } else text = HELP;
+      log.reply = text ? text.slice(0, 30) : "(无)";
+      if (!text) return done(new Response("success"));
+      return done(xmlResponse(from, to, text));
+    } catch (e) {
+      log.error = e.message;
+      return done(new Response("success"));
     }
-    if (request.method === "GET") return new Response(params.get("echostr") || "");
-
-    const xml = await request.text();
-    console.log(`收到消息：${xmlField(xml, "MsgType")} ${xmlField(xml, "Content") || xmlField(xml, "Event")}`);
-    const from = xmlField(xml, "FromUserName"), to = xmlField(xml, "ToUserName");
-    const type = xmlField(xml, "MsgType");
-
-    // 第一个发消息的人成为主人；其他人一律不理，避免被别人改设置
-    let owner = await env.FX.get("owner");
-    if (!owner) { owner = from; await env.FX.put("owner", from); }
-    if (from !== owner) return new Response(wxReply(from, to, "这是私人机器人。"));
-
-    let text;
-    if (type === "event") text = xmlField(xml, "Event") === "subscribe" ? `欢迎！\n\n${HELP}` : "";
-    else if (type === "text") {
-      try { text = await handleText(env, xmlField(xml, "Content"), { waitUntil: (p) => ctx.waitUntil(p) }); }
-      catch (e) { text = `出错了：${e.message}`; }
-    } else text = HELP;
-    if (!text) return new Response("success");
-    return new Response(wxReply(from, to, text), { headers: { "Content-Type": "application/xml" } });
   },
 
   async scheduled(event, env, ctx) {
